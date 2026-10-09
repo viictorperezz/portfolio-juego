@@ -29,8 +29,9 @@ vWall = uv;`),e.fragmentShader=e.fragmentShader.replace(`#include <common>`,`#in
         float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float box(vec2 p, vec2 a, vec2 b) { vec2 s = step(a, p) * step(p, b); return s.x * s.y; }
         // Máscaras de la fachada: x = cristal, y = persiana, z = marco/barandilla oscura, w = elemento claro (forjado, cornisa, losa)
-        vec4 facadeMask(vec2 w, out float shopSign, out vec3 signColor) {
-          shopSign = 0.0; signColor = vec3(0.0);
+        // Además: shade = sombra del hueco (profundidad), win = (vano, planta) de cada ventana, winFrame = carpintería.
+        vec4 facadeMask(vec2 w, out float shopSign, out vec3 signColor, out float shade, out vec2 win, out float winFrame) {
+          shopSign = 0.0; signColor = vec3(0.0); shade = 1.0; win = vec2(-1.0); winFrame = 0.0;
           // Semilla entera: el valor interpolado varía en millonésimas entre píxeles y el hash lo amplificaría (ruido).
           float seed = floor(vFacade.y + 0.5), top = vFacade.w;
           if (vFacade.z < 0.5) return vec4(0.0);                // medianera: sin huecos
@@ -80,7 +81,12 @@ vWall = uv;`),e.fragmentShader=e.fragmentShader.replace(`#include <common>`,`#in
           float slats = blind * mix(0.85 + 0.15 * slat, 0.92, clamp(fw * 2.0, 0.0, 1.0));
           m.x = hole - blind;
           m.y = slats;
-          m.z = frame;
+          winFrame = frame;
+          win = vec2(bay, lvl);
+          // Fondo del hueco: sombra bajo el dintel y la caja de la persiana, y en una jamba (la ventana está retranqueada).
+          shade = 1.0 - hole * (0.42 * smoothstep(hi.y - 0.24, hi.y, fy) + 0.22 * (1.0 - smoothstep(lo.x, lo.x + 0.14, bx)));
+          // Vierteaguas de piedra bajo las ventanas.
+          if (!balcony) m.w = max(m.w, box(vec2(bx, fy), vec2(lo.x - 0.13, lo.y - 0.17), vec2(hi.x + 0.13, lo.y - 0.07)));
           if (balcony) {                                        // barandilla de barrotes + losa del balcón
             float rail = box(vec2(bx, fy), vec2(0.55, 0.0), vec2(2.75, 1.05));
             float bars = rail * (step(0.82, fract(bx * 7.0)) + step(0.95, fy));
@@ -97,23 +103,33 @@ vWall = uv;`),e.fragmentShader=e.fragmentShader.replace(`#include <common>`,`#in
         base *= 0.9 + 0.2 * h21(vec2(bseed, 1.7));
         if (vFacade.z < 0.5) base *= vec3(0.86, 0.84, 0.8);      // medianera: más apagada
         if (vWall.y < 1.0 && vFacade.z > 0.5) base = texture2D(tStone, vWall / 1.4).rgb * 0.85; // zócalo de piedra
-        float shopSign; vec3 signColor;
-        vec4 fm = facadeMask(vWall, shopSign, signColor);
+        float shopSign, shade, winFrame; vec3 signColor; vec2 win;
+        vec4 fm = facadeMask(vWall, shopSign, signColor, shade, win, winFrame);
+        // Por edificio: carpintería (PVC blanco, aluminio marrón o plata) y color de persiana; por ventana, el interior.
+        float fr = h21(vec2(bseed, 4.2)), bc = h21(vec2(bseed, 5.3)), wr = h21(win + bseed * 0.37);
+        vec3 frameCol = fr < 0.45 ? vec3(0.9, 0.9, 0.87) : fr < 0.75 ? vec3(0.3, 0.22, 0.15) : vec3(0.6, 0.61, 0.62);
+        vec3 blindCol = bc < 0.4 ? vec3(0.78, 0.74, 0.66) : bc < 0.7 ? vec3(0.86, 0.86, 0.84) : bc < 0.85 ? vec3(0.45, 0.35, 0.26) : vec3(0.63, 0.63, 0.61);
         vec3 col = base;
-        col = mix(col, vec3(0.93, 0.92, 0.88), fm.w);            // forjados, losas y cornisa
-        col = mix(col, vec3(0.16, 0.15, 0.14), fm.z);            // marcos y barandillas
-        col = mix(col, vec3(0.78, 0.74, 0.66) * (0.8 + 0.2 * fm.y), step(0.01, fm.y)); // persiana
+        col = mix(col, vec3(0.93, 0.92, 0.88), fm.w);            // forjados, losas, vierteaguas y cornisa
+        col = mix(col, frameCol, winFrame);                       // carpintería de las ventanas
+        col = mix(col, vec3(0.16, 0.15, 0.14), fm.z);            // barandillas y marcos de los bajos
+        col = mix(col, blindCol * (0.8 + 0.2 * fm.y), step(0.01, fm.y)); // persiana
         // Cristal: tono gris azulado (con metalness alto, el reflejo del cielo se tiñe de este color).
         // En planta baja, algo más claro con "interior" variable (escaparates).
         float shopRow = step(vWall.y, 3.0);
-        vec3 glass = mix(vec3(0.32, 0.38, 0.44), vec3(0.17, 0.16, 0.15) * (0.6 + 0.9 * h21(vec2(floor(vWall.x / 3.3), bseed))), shopRow);
+        // Pisos: cristal oscuro variable y, en la mitad de las ventanas, visillo claro con pliegues (que se funden a distancia).
+        float curtain = step(0.6, wr) * (1.0 - shopRow);
+        float fold = 0.88 + 0.12 * sin(vWall.x * 38.0) * clamp(1.5 - fwidth(vWall.x * 38.0), 0.0, 1.0);
+        vec3 upGlass = mix(vec3(0.16, 0.19, 0.22) * (0.7 + 0.6 * fract(wr * 7.3)), vec3(0.8, 0.78, 0.73) * fold, curtain * 0.6);
+        vec3 glass = mix(upGlass, vec3(0.17, 0.16, 0.15) * (0.6 + 0.9 * h21(vec2(floor(vWall.x / 3.3), bseed))), shopRow);
         col = mix(col, glass, fm.x);
         col = mix(col, signColor, shopSign);
+        col *= shade;
         diffuseColor.rgb *= col;
         float glassMask = fm.x;`).replace(`#include <roughnessmap_fragment>`,`float roughnessFactor = mix(roughness, 0.12, glassMask);
-        roughnessFactor = mix(roughnessFactor, 0.5, fm.z);`).replace(`#include <metalnessmap_fragment>`,`float metalnessFactor = mix(metalness, 0.75 - 0.5 * shopRow, glassMask);`).replace(`#include <normal_fragment_maps>`,`{
+        roughnessFactor = mix(roughnessFactor, 0.5, max(fm.z, winFrame));`).replace(`#include <metalnessmap_fragment>`,`float metalnessFactor = mix(metalness, (0.75 - 0.5 * shopRow) * (1.0 - 0.7 * curtain), glassMask);`).replace(`#include <normal_fragment_maps>`,`{
           vec3 mapN = (st < 2 ? texture2D(tNorBrick, tuv) : texture2D(tNorPlaster, tuv)).xyz * 2.0 - 1.0;
           mapN.xy *= normalScale * (1.0 - max(glassMask, fm.y));
           mat3 tbn = getTangentFrame(-vViewPosition, normal, tuv);
           normal = normalize(tbn * mapN);
-        }`)},e.customProgramCacheKey=()=>`facade-v1`,e}var R=.9;function z(e,t,n){let r=!1;for(let i=0,a=n.length-1;i<n.length;a=i++){let[o,s]=n[i],[c,l]=n[a];s>t!=l>t&&e<(c-o)*(t-s)/(l-s)+o&&(r=!r)}return r}function B(e,t=20){let n=new Map,r=(e,t)=>e*100003+t;e.forEach((e,i)=>{let a=e.p.map(e=>e[0]),o=e.p.map(e=>e[1]);e.box=[Math.min(...a),Math.min(...o),Math.max(...a),Math.max(...o)];for(let a=Math.floor(e.box[0]/t);a<=Math.floor(e.box[2]/t);a++)for(let o=Math.floor(e.box[1]/t);o<=Math.floor(e.box[3]/t);o++){let e=r(a,o);n.has(e)||n.set(e,[]),n.get(e).push(i)}});let i=(e,i)=>n.get(r(Math.floor(e/t),Math.floor(i/t)))??[];return{near:i,heightAt(t,n,r=-1){let a=0;for(let o of i(t,n)){if(o===r)continue;let i=e[o],s=i.box;t<s[0]||t>s[2]||n<s[1]||n>s[3]||i.h>a&&z(t,n,i.p)&&(a=i.h)}return a}}}function V(e,t,n){if(e.name&&/ayuntamiento|consistorial/i.test(e.name))return 0;let r=t%1;return n>=5?r<.45?0:r<.75?1:2:r<.3?0:r<.45?1:r<.75?2:3}function H(n,a,{skip:o=new Set}={}){let c=n.parts,u=B(c),d=[],m=[],h=[],g={pos:[],nor:[],uv:[],fac:[]};c.forEach((t,r)=>{if(t.h<=0||o.has(t.b))return;let i=n.buildings[t.b]??{},c=t.p,d=c.map(([e,t])=>a(e,t)),p=Math.min(...d),_=d.reduce((e,t)=>e+t,0)/d.length,v=_+t.h,y=t.b*.61803%1+1e-4,b=V(i,y,t.f),x=v+(t.h>4?R:0),S=0;for(let e=0;e<c.length;e++){let n=c[e],a=c[(e+1)%c.length],o=Math.hypot(a[0]-n[0],a[1]-n[1]);if(o<.05)continue;let s=(a[1]-n[1])/o,l=-(a[0]-n[0])/o,d=(n[0]+a[0])/2,f=(n[1]+a[1])/2,m=z(d+s*.1,f+l*.1,c)?-1:1,h=0;for(let e of[.25,.5,.75]){let t=n[0]+(a[0]-n[0])*e+s*m*.6,i=n[1]+(a[1]-n[1])*e+l*m*.6;h=Math.max(h,u.heightAt(t,i,r))}if(h>=t.h+(t.h>4?R:0)-.3){S+=o;continue}let v=!i.use||/residential|retail|commercial/.test(i.use),C=h>0?0:v?1:2,w=-(a[1]-n[1]),T=a[0]-n[0];w*s*m+T*l*m<0&&([n,a]=[a,n]);let E=p-.5,D=x,O=E-_,k=D-_,A=[s*m,0,l*m],j=[[n,E,S,O],[a,E,S+o,O],[a,D,S+o,k],[n,E,S,O],[a,D,S+o,k],[n,D,S,k]];for(let[e,n,r,i]of j)g.pos.push(e[0],n,e[1]),g.nor.push(...A),g.uv.push(r,i),g.fac.push(b,Math.round(y*997),C,t.h);S+=o}try{let n=c.map(([e,t])=>new l(e,t)),r=f.triangulateShape(n,[]),a=[];for(let e of r)for(let n of[e[0],e[2],e[1]])a.push(c[n][0],t.h>4?v+.15:v,c[n][1]);let o=new s;o.setAttribute(`position`,new e(a,3)),o.setAttribute(`uv`,new e(a.filter((e,t)=>t%3!=1).map(e=>e/3),2)),o.computeVertexNormals(),(i.year&&i.year<1965||t.f<=2?h:m).push(o)}catch{}});let v=new s;v.setAttribute(`position`,new e(g.pos,3)),v.setAttribute(`normal`,new e(g.nor,3)),v.setAttribute(`uv`,new e(g.uv,2)),v.setAttribute(`facade`,new e(g.fac,4));let y=new r(v,L());y.castShadow=y.receiveShadow=!0,y.name=`walls`;let b=new t;b.add(y);let x=new i({map:_(`sidewalk_diff`,{srgb:!0}),color:`#9a958c`,roughness:.95}),S=new i({map:_(`roof_tiles_diff`,{srgb:!0}),normalMap:_(`roof_tiles_nor`),roughness:.85});for(let[e,t]of[[m,x],[h,S]]){if(!e.length)continue;let n=new r(p(e),t);n.castShadow=n.receiveShadow=!0,b.add(n)}return d.push(y),{group:b,index:u,walls:y}}export{j as a,y as c,I as i,v as l,B as n,S as o,z as r,A as s,H as t,_ as u};
+        }`)},e.customProgramCacheKey=()=>`facade-v2`,e}var R=.9;function z(e,t,n){let r=!1;for(let i=0,a=n.length-1;i<n.length;a=i++){let[o,s]=n[i],[c,l]=n[a];s>t!=l>t&&e<(c-o)*(t-s)/(l-s)+o&&(r=!r)}return r}function B(e,t=20){let n=new Map,r=(e,t)=>e*100003+t;e.forEach((e,i)=>{let a=e.p.map(e=>e[0]),o=e.p.map(e=>e[1]);e.box=[Math.min(...a),Math.min(...o),Math.max(...a),Math.max(...o)];for(let a=Math.floor(e.box[0]/t);a<=Math.floor(e.box[2]/t);a++)for(let o=Math.floor(e.box[1]/t);o<=Math.floor(e.box[3]/t);o++){let e=r(a,o);n.has(e)||n.set(e,[]),n.get(e).push(i)}});let i=(e,i)=>n.get(r(Math.floor(e/t),Math.floor(i/t)))??[];return{near:i,heightAt(t,n,r=-1){let a=0;for(let o of i(t,n)){if(o===r)continue;let i=e[o],s=i.box;t<s[0]||t>s[2]||n<s[1]||n>s[3]||i.h>a&&z(t,n,i.p)&&(a=i.h)}return a}}}function V(e,t,n){if(e.name&&/ayuntamiento|consistorial/i.test(e.name))return 0;let r=t%1;return n>=5?r<.45?0:r<.75?1:2:r<.3?0:r<.45?1:r<.75?2:3}function H(n,a,{skip:o=new Set}={}){let c=n.parts,u=B(c),d=[],m=[],h=[],g={pos:[],nor:[],uv:[],fac:[]};c.forEach((t,r)=>{if(t.h<=0||o.has(t.b))return;let i=n.buildings[t.b]??{},c=t.p,d=c.map(([e,t])=>a(e,t)),p=Math.min(...d),_=d.reduce((e,t)=>e+t,0)/d.length,v=_+t.h,y=t.b*.61803%1+1e-4,b=V(i,y,t.f),x=v+(t.h>4?R:0),S=0;for(let e=0;e<c.length;e++){let n=c[e],a=c[(e+1)%c.length],o=Math.hypot(a[0]-n[0],a[1]-n[1]);if(o<.05)continue;let s=(a[1]-n[1])/o,l=-(a[0]-n[0])/o,d=(n[0]+a[0])/2,f=(n[1]+a[1])/2,m=z(d+s*.1,f+l*.1,c)?-1:1,h=0;for(let e of[.25,.5,.75]){let t=n[0]+(a[0]-n[0])*e+s*m*.6,i=n[1]+(a[1]-n[1])*e+l*m*.6;h=Math.max(h,u.heightAt(t,i,r))}if(h>=t.h+(t.h>4?R:0)-.3){S+=o;continue}let v=!i.use||/residential|retail|commercial/.test(i.use),C=h>0?0:v?1:2,w=-(a[1]-n[1]),T=a[0]-n[0];w*s*m+T*l*m<0&&([n,a]=[a,n]);let E=p-.5,D=x,O=E-_,k=D-_,A=[s*m,0,l*m],j=[[n,E,S,O],[a,E,S+o,O],[a,D,S+o,k],[n,E,S,O],[a,D,S+o,k],[n,D,S,k]];for(let[e,n,r,i]of j)g.pos.push(e[0],n,e[1]),g.nor.push(...A),g.uv.push(r,i),g.fac.push(b,Math.round(y*997),C,t.h);S+=o}try{let n=c.map(([e,t])=>new l(e,t)),r=f.triangulateShape(n,[]),a=[];for(let e of r)for(let n of[e[0],e[2],e[1]])a.push(c[n][0],t.h>4?v+.15:v,c[n][1]);let o=new s;o.setAttribute(`position`,new e(a,3)),o.setAttribute(`uv`,new e(a.filter((e,t)=>t%3!=1).map(e=>e/3),2)),o.computeVertexNormals(),(i.year&&i.year<1965||t.f<=2?h:m).push(o)}catch{}});let v=new s;v.setAttribute(`position`,new e(g.pos,3)),v.setAttribute(`normal`,new e(g.nor,3)),v.setAttribute(`uv`,new e(g.uv,2)),v.setAttribute(`facade`,new e(g.fac,4));let y=new r(v,L());y.castShadow=y.receiveShadow=!0,y.name=`walls`;let b=new t;b.add(y);let x=new i({map:_(`sidewalk_diff`,{srgb:!0}),color:`#9a958c`,roughness:.95}),S=new i({map:_(`roof_tiles_diff`,{srgb:!0}),normalMap:_(`roof_tiles_nor`),roughness:.85});for(let[e,t]of[[m,x],[h,S]]){if(!e.length)continue;let n=new r(p(e),t);n.castShadow=n.receiveShadow=!0,b.add(n)}return d.push(y),{group:b,index:u,walls:y}}export{j as a,y as c,I as i,v as l,B as n,S as o,z as r,A as s,H as t,_ as u};
